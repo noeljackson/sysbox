@@ -193,10 +193,16 @@ function copy_sysbox_env_config_to_host() {
 
 function apply_sysbox_env_config() {
     echo "Applying sysbox sysctl settings..."
-    sysctl -p "${host_sysctl}/99-sysbox-sysctl.conf"
+    # Run sysctl on the host
+    nsenter -t 1 -m -u -i -n -p -- sysctl -p /lib/sysctl.d/99-sysbox-sysctl.conf
 
     echo "Loading kernel modules..."
-    modprobe configfs || true
+    nsenter -t 1 -m -u -i -n -p -- modprobe configfs || true
+}
+
+function host_systemctl() {
+    # Run systemctl on the host via nsenter
+    nsenter -t 1 -m -u -i -n -p -- systemctl "$@"
 }
 
 function copy_sysbox_systemd_to_host() {
@@ -204,37 +210,37 @@ function copy_sysbox_systemd_to_host() {
     cp "${sysbox_artifacts}/systemd/sysbox.service" "${host_systemd}/sysbox.service"
     cp "${sysbox_artifacts}/systemd/sysbox-mgr.service" "${host_systemd}/sysbox-mgr.service"
     cp "${sysbox_artifacts}/systemd/sysbox-fs.service" "${host_systemd}/sysbox-fs.service"
-    systemctl daemon-reload
-    systemctl enable sysbox.service sysbox-mgr.service sysbox-fs.service
+    host_systemctl daemon-reload
+    host_systemctl enable sysbox.service sysbox-mgr.service sysbox-fs.service
 }
 
 function start_sysbox() {
     echo "Starting sysbox services..."
-    systemctl restart sysbox
+    host_systemctl restart sysbox
     sleep 2
-    if ! systemctl is-active --quiet sysbox; then
+    if ! host_systemctl is-active --quiet sysbox; then
         echo "Warning: sysbox.service not active, trying individual services..."
-        systemctl restart sysbox-mgr
+        host_systemctl restart sysbox-mgr
         sleep 2
-        systemctl restart sysbox-fs
+        host_systemctl restart sysbox-fs
     fi
 
     # Verify services are running
     echo "Verifying sysbox services..."
-    systemctl status sysbox-mgr --no-pager | head -5
-    systemctl status sysbox-fs --no-pager | head -5
+    host_systemctl status sysbox-mgr --no-pager | head -5
+    host_systemctl status sysbox-fs --no-pager | head -5
 }
 
 function stop_sysbox() {
     echo "Stopping sysbox services..."
-    systemctl stop sysbox || true
-    systemctl stop sysbox-fs || true
-    systemctl stop sysbox-mgr || true
+    host_systemctl stop sysbox || true
+    host_systemctl stop sysbox-fs || true
+    host_systemctl stop sysbox-mgr || true
 }
 
 function verify_sysbox_runc() {
     echo "Verifying sysbox-runc features command (required for containerd)..."
-    if ! ${host_bin}/sysbox-runc features > /dev/null 2>&1; then
+    if ! nsenter -t 1 -m -u -i -n -p -- /usr/bin/sysbox-runc features > /dev/null 2>&1; then
         die "sysbox-runc features command failed! This binary may not be compatible with containerd."
     fi
     echo "sysbox-runc features command works!"
@@ -242,7 +248,7 @@ function verify_sysbox_runc() {
     # Log sysbox-mgr capabilities
     sleep 2
     echo "Sysbox-mgr capabilities:"
-    journalctl -u sysbox-mgr --no-pager -n 20 | grep -E "(Shiftfs|ID-mapped|Operating)" | tail -5 || true
+    nsenter -t 1 -m -u -i -n -p -- journalctl -u sysbox-mgr --no-pager -n 20 | grep -E "(Shiftfs|ID-mapped|Operating)" | tail -5 || true
 }
 
 function install_sysbox() {
@@ -333,11 +339,11 @@ function cleanup() {
         rm -f "${host_bin}/sysbox-runc"
 
         # Remove systemd units
-        systemctl disable sysbox.service sysbox-mgr.service sysbox-fs.service || true
+        host_systemctl disable sysbox.service sysbox-mgr.service sysbox-fs.service || true
         rm -f "${host_systemd}/sysbox.service"
         rm -f "${host_systemd}/sysbox-mgr.service"
         rm -f "${host_systemd}/sysbox-fs.service"
-        systemctl daemon-reload
+        host_systemctl daemon-reload
 
         # Remove configs
         rm -f "${host_sysctl}/99-sysbox-sysctl.conf"
