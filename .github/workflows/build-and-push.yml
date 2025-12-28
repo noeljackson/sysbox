@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}-deploy
+  SYSBOX_VERSION: "0.6.7"
 
 jobs:
   build-binaries:
@@ -70,11 +71,31 @@ jobs:
 
       - name: Prepare artifacts
         run: |
-          mkdir -p artifacts/bin
-          cp sysbox-runc/build/amd64/sysbox-runc artifacts/bin/
-          cp sysbox-mgr/build/amd64/sysbox-mgr artifacts/bin/
-          cp sysbox-fs/build/amd64/sysbox-fs artifacts/bin/
-          chmod +x artifacts/bin/*
+          mkdir -p artifacts/bin/generic
+          cp sysbox-runc/build/amd64/sysbox-runc artifacts/bin/generic/
+          cp sysbox-mgr/build/amd64/sysbox-mgr artifacts/bin/generic/
+          cp sysbox-fs/build/amd64/sysbox-fs artifacts/bin/generic/
+          chmod +x artifacts/bin/generic/*
+
+          # Copy k8s scripts
+          mkdir -p artifacts/scripts
+          cp sysbox-pkgr/k8s/scripts/sysbox-deploy-k8s.sh artifacts/scripts/
+          cp sysbox-pkgr/k8s/scripts/sysbox-installer-helper.sh artifacts/scripts/
+          cp sysbox-pkgr/k8s/scripts/sysbox-removal-helper.sh artifacts/scripts/
+          # Containerd-specific deploy script (from main repo)
+          cp scripts/sysbox-containerd-deploy.sh artifacts/scripts/
+          chmod +x artifacts/scripts/*
+
+          # Copy systemd files
+          mkdir -p artifacts/systemd
+          cp sysbox-pkgr/k8s/systemd/50-sysbox-mod.conf artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/99-sysbox-sysctl.conf artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/sysbox.service artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/sysbox-mgr.service artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/sysbox-fs.service artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/sysbox-installer-helper.service artifacts/systemd/
+          cp sysbox-pkgr/k8s/systemd/sysbox-removal-helper.service artifacts/systemd/
+
           # Create version file
           echo "$(cat VERSION)-$(git rev-parse --short HEAD)" > artifacts/VERSION
 
@@ -127,27 +148,51 @@ jobs:
       - name: Create Dockerfile
         run: |
           cat > Dockerfile.deploy <<'EOF'
-          FROM ubuntu:22.04
+          # Use CentOS 7 base for systemctl/dbus compatibility with host
+          FROM centos:7
 
-          RUN apt-get update && apt-get install -y \
-              curl \
-              jq \
-              && rm -rf /var/lib/apt/lists/*
+          ARG SYSBOX_VERSION=0.6.7
+          ENV SYSBOX_VERSION=${SYSBOX_VERSION}
+
+          # Fix CentOS 7 repos (EOL)
+          RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* \
+              && sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
+
+          # Install dependencies
+          RUN yum install -y curl wget git bc which epel-release \
+              && yum install -y jq \
+              && yum clean all
 
           # Install kubectl
-          RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
-              && chmod +x kubectl \
-              && mv kubectl /usr/local/bin/
+          RUN curl -Lso /bin/kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl \
+              && chmod +x /bin/kubectl
 
-          # Copy sysbox binaries
-          COPY artifacts/bin/sysbox-runc /opt/sysbox/bin/sysbox-runc
-          COPY artifacts/bin/sysbox-mgr /opt/sysbox/bin/sysbox-mgr
-          COPY artifacts/bin/sysbox-fs /opt/sysbox/bin/sysbox-fs
-          RUN chmod +x /opt/sysbox/bin/*
+          # Copy sysbox binaries (with features command for containerd)
+          COPY artifacts/bin/generic/sysbox-runc /opt/sysbox/bin/generic/sysbox-runc
+          COPY artifacts/bin/generic/sysbox-mgr /opt/sysbox/bin/generic/sysbox-mgr
+          COPY artifacts/bin/generic/sysbox-fs /opt/sysbox/bin/generic/sysbox-fs
+          RUN chmod +x /opt/sysbox/bin/generic/*
+
+          # Copy k8s deployment scripts
+          COPY artifacts/scripts/sysbox-deploy-k8s.sh /opt/sysbox/scripts/sysbox-deploy-k8s.sh
+          COPY artifacts/scripts/sysbox-installer-helper.sh /opt/sysbox/scripts/sysbox-installer-helper.sh
+          COPY artifacts/scripts/sysbox-removal-helper.sh /opt/sysbox/scripts/sysbox-removal-helper.sh
+          COPY artifacts/scripts/sysbox-containerd-deploy.sh /opt/sysbox/scripts/sysbox-containerd-deploy.sh
+          RUN chmod +x /opt/sysbox/scripts/*
+
+          # Copy systemd unit files and configs
+          COPY artifacts/systemd/50-sysbox-mod.conf /opt/sysbox/systemd/50-sysbox-mod.conf
+          COPY artifacts/systemd/99-sysbox-sysctl.conf /opt/sysbox/systemd/99-sysbox-sysctl.conf
+          COPY artifacts/systemd/sysbox.service /opt/sysbox/systemd/sysbox.service
+          COPY artifacts/systemd/sysbox-mgr.service /opt/sysbox/systemd/sysbox-mgr.service
+          COPY artifacts/systemd/sysbox-fs.service /opt/sysbox/systemd/sysbox-fs.service
+          COPY artifacts/systemd/sysbox-installer-helper.service /opt/sysbox/systemd/sysbox-installer-helper.service
+          COPY artifacts/systemd/sysbox-removal-helper.service /opt/sysbox/systemd/sysbox-removal-helper.service
 
           WORKDIR /opt/sysbox
 
-          CMD ["echo", "Sysbox binaries available at /opt/sysbox/bin/"]
+          # Default command runs the deploy script
+          CMD ["bash", "-c", "/opt/sysbox/scripts/sysbox-deploy-k8s.sh ce install"]
           EOF
 
       - name: Build and push
