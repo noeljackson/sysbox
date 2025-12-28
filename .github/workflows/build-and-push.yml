@@ -18,6 +18,10 @@ jobs:
     strategy:
       matrix:
         arch: [amd64]
+    env:
+      VERSION: "0.6.7"
+      EDITION: "Community Edition (CE)"
+      TARGET_ARCH: amd64
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@v4
@@ -66,8 +70,8 @@ jobs:
         run: |
           mkdir -p artifacts/bin
           cp sysbox-runc/build/amd64/sysbox-runc artifacts/bin/
-          cp sysbox-mgr/sysbox-mgr artifacts/bin/
-          cp sysbox-fs/sysbox-fs artifacts/bin/
+          cp sysbox-mgr/build/amd64/sysbox-mgr artifacts/bin/
+          cp sysbox-fs/build/amd64/sysbox-fs artifacts/bin/
           chmod +x artifacts/bin/*
           # Create version file
           echo "$(cat VERSION)-$(git rev-parse --short HEAD)" > artifacts/VERSION
@@ -126,7 +130,6 @@ jobs:
           RUN apt-get update && apt-get install -y \
               curl \
               jq \
-              kubectl \
               && rm -rf /var/lib/apt/lists/*
 
           # Install kubectl
@@ -140,18 +143,9 @@ jobs:
           COPY artifacts/bin/sysbox-fs /opt/sysbox/bin/sysbox-fs
           RUN chmod +x /opt/sysbox/bin/*
 
-          # Copy systemd service files
-          COPY sysbox-pkgr/k8s/systemd/sysbox-fs.service /opt/sysbox/systemd/sysbox-fs.service
-          COPY sysbox-pkgr/k8s/systemd/sysbox-mgr.service /opt/sysbox/systemd/sysbox-mgr.service
-          COPY sysbox-pkgr/k8s/systemd/sysbox.service /opt/sysbox/systemd/sysbox.service
-
-          # Copy install script
-          COPY sysbox-pkgr/k8s/scripts/sysbox-deploy-k8s.sh /opt/sysbox/scripts/sysbox-deploy-k8s.sh
-          RUN chmod +x /opt/sysbox/scripts/*.sh
-
           WORKDIR /opt/sysbox
 
-          ENTRYPOINT ["/bin/bash", "/opt/sysbox/scripts/sysbox-deploy-k8s.sh"]
+          CMD ["echo", "Sysbox binaries available at /opt/sysbox/bin/"]
           EOF
 
       - name: Build and push
