@@ -49,13 +49,13 @@ jobs:
       - name: Build sysbox-runc (static)
         run: |
           cd sysbox-runc
-          make BUILDTAGS="seccomp apparmor" static
+          make BUILDTAGS="seccomp apparmor idmapped_mnt" static
 
       - name: Build sysbox-mgr
         run: |
           cd sysbox-mgr
           go mod tidy
-          make
+          make BUILDTAGS="idmapped_mnt"
 
       - name: Build sysbox-fs
         run: |
