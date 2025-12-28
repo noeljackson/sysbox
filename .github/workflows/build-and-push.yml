@@ -54,11 +54,13 @@ jobs:
       - name: Build sysbox-mgr
         run: |
           cd sysbox-mgr
+          go mod tidy
           make
 
       - name: Build sysbox-fs
         run: |
           cd sysbox-fs
+          go mod tidy
           make
 
       - name: Verify sysbox-runc features command
