@@ -1,0 +1,190 @@
+name: Build and Push Sysbox
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-deploy
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        arch: [amd64]
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libseccomp-dev protobuf-compiler
+
+      - name: Install protoc-gen-go
+        run: go install github.com/golang/protobuf/protoc-gen-go@v1.5.2
+
+      - name: Build sysbox-ipc
+        run: |
+          cd sysbox-ipc
+          make sysbox-ipc
+
+      - name: Build sysbox-runc (static)
+        run: |
+          cd sysbox-runc
+          make BUILDTAGS="seccomp apparmor" static
+
+      - name: Build sysbox-mgr
+        run: |
+          cd sysbox-mgr
+          make
+
+      - name: Build sysbox-fs
+        run: |
+          cd sysbox-fs
+          make
+
+      - name: Verify sysbox-runc features command
+        run: |
+          ./sysbox-runc/build/amd64/sysbox-runc --version
+          ./sysbox-runc/build/amd64/sysbox-runc features | head -20
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/bin
+          cp sysbox-runc/build/amd64/sysbox-runc artifacts/bin/
+          cp sysbox-mgr/sysbox-mgr artifacts/bin/
+          cp sysbox-fs/sysbox-fs artifacts/bin/
+          chmod +x artifacts/bin/*
+          # Create version file
+          echo "$(cat VERSION)-$(git rev-parse --short HEAD)" > artifacts/VERSION
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysbox-binaries-${{ matrix.arch }}
+          path: artifacts/
+
+  build-and-push-image:
+    needs: build-binaries
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sysbox-binaries-amd64
+          path: artifacts/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create Dockerfile
+        run: |
+          cat > Dockerfile.deploy <<'EOF'
+          FROM ubuntu:22.04
+
+          RUN apt-get update && apt-get install -y \
+              curl \
+              jq \
+              kubectl \
+              && rm -rf /var/lib/apt/lists/*
+
+          # Install kubectl
+          RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+              && chmod +x kubectl \
+              && mv kubectl /usr/local/bin/
+
+          # Copy sysbox binaries
+          COPY artifacts/bin/sysbox-runc /opt/sysbox/bin/sysbox-runc
+          COPY artifacts/bin/sysbox-mgr /opt/sysbox/bin/sysbox-mgr
+          COPY artifacts/bin/sysbox-fs /opt/sysbox/bin/sysbox-fs
+          RUN chmod +x /opt/sysbox/bin/*
+
+          # Copy systemd service files
+          COPY sysbox-pkgr/k8s/systemd/sysbox-fs.service /opt/sysbox/systemd/sysbox-fs.service
+          COPY sysbox-pkgr/k8s/systemd/sysbox-mgr.service /opt/sysbox/systemd/sysbox-mgr.service
+          COPY sysbox-pkgr/k8s/systemd/sysbox.service /opt/sysbox/systemd/sysbox.service
+
+          # Copy install script
+          COPY sysbox-pkgr/k8s/scripts/sysbox-deploy-k8s.sh /opt/sysbox/scripts/sysbox-deploy-k8s.sh
+          RUN chmod +x /opt/sysbox/scripts/*.sh
+
+          WORKDIR /opt/sysbox
+
+          ENTRYPOINT ["/bin/bash", "/opt/sysbox/scripts/sysbox-deploy-k8s.sh"]
+          EOF
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.deploy
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release-binaries:
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sysbox-binaries-amd64
+          path: artifacts/
+
+      - name: Create tarball
+        run: |
+          cd artifacts
+          tar -czvf sysbox-linux-amd64.tar.gz bin/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/sysbox-linux-amd64.tar.gz
+          generate_release_notes: true
